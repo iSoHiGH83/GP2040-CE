@@ -1,161 +1,128 @@
-name: CMake
+name: Build GP2040-CE (10 Macros)
 
 on:
   push:
-    branches: ["main"]
+    branches: [ main, develop ]
   pull_request:
-    branches: ["main"]
-  #  pull_request_target:
-  #    branches: [ "main" ]
+    branches: [ main, develop ]
   workflow_dispatch:
-    inputs:
-      board_config:
-        description: "Board configuration to build (leave empty to build all)"
-        required: false
-        type: choice
-        options:
-          - ""
-          - ARCController
-          - ASiLVLABC
-          - ASiLVLWASD
-          - Blank
-          - Pico
-          - PicoW
-          - Pico2
-          - BentoBox
-          - FlatboxRev4
-          - FlatboxRev5
-          - FlatboxRev5RGB
-          - FlatboxRev5USBPassthrough
-          - FlatboxRev5Southpaw
-          - FlatboxRev8
-          - Granola
-          - GranolaBeacon
-          - AdafruitKB2040
-          - KeyboardConverter
-          - Haute42COSMOX
-          - Haute42COSMOXCAS
-          - Haute42COSMOXCAT
-          - Haute42COSMOXMLite
-          - Haute42COSMOXMUltra
-          - Haute42COSMOXXAnalog
-          - Liatris
-          - MavercadeRev1
-          - MavercadeRev2
-          - MavercadeRev3
-          - MiSTercadeV2
-          - OpenCore0
-          - OpenCore0MIXUP
-          - OpenCore0WASD
-          - OSUMGP-RP2040
-          - PicoFightingBoard
-          - PimoroniPicoPlus2
-          - PXPGamepad
-          - ReflexCtrlGenesis6
-          - ReflexCtrlNES
-          - ReflexCtrlSaturn
-          - ReflexCtrlSNES
-          - ReflexCtrlVB
-          - ReflexEncodeV1.2
-          - ReflexEncodeV2.0
-          - RP2040AdvancedBreakoutBoard
-          - RP2040AdvancedBreakoutBoardUSBPassthrough
-          - RP2040MiniBreakoutBoard
-          - RP2040MiniBreakoutBoardUSBPassthrough
-          - SeeedXIAORP2040
-          - SparkFunProMicro
-          - SparkFunProMicroRP2350
-          - WaveshareZero
-          - WaveshareRP2350BPlusW
-          - SGFDevices
-          - ZeroRhythm
-
-env:
-  BUILD_TYPE: Release
 
 jobs:
-  call-node-workflow:
-    uses: ./.github/workflows/node.js.yml
-  build-config-list:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@v6.0.1
-      - id: set-matrix
-        run: |
-          CONFIG_DIRS=$(ls -d ./configs/*/ | cut -f3 -d'/' | jq -R -s -c 'split("\n")[:-1]')
-          echo "matrix=$CONFIG_DIRS" >> $GITHUB_OUTPUT
   build:
-    needs: [call-node-workflow, build-config-list]
-    # The CMake configure and build commands are platform agnostic and should work equally well on Windows or Mac.
-    # You can convert this to a matrix build if you need cross-platform coverage.
-    # See: https://docs.github.com/en/free-pro-team@latest/actions/learn-github-actions/managing-complex-workflows#using-a-build-matrix
     runs-on: ubuntu-22.04
+
     strategy:
+      fail-fast: false
       matrix:
-        GP2040_BOARDCONFIG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.board_config != '' && fromJSON(format('["{0}"]', github.event.inputs.board_config)) || fromJSON(needs.build-config-list.outputs.matrix) }}
+        config: [Pico, FlatboxRev4, FlatboxRev5] # Trage hier deine Board-Configs ein (z.B. Pico,RP2040AdvancedBreakoutBoard)
+
     steps:
-      - name: Setup cmake
-        uses: jwlawson/actions-setup-cmake@v2
-        with:
-          cmake-version: "3.31.x"
-      - name: Verify cmake
-        run: cmake --version
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
-      #Global Setup
-      - name: Checkout GP2040-CE
-        uses: actions/checkout@v6.0.1
-        with:
-          fetch-depth: 0
-          fetch-tags: true
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y cmake gcc-arm-none-eabi libnewlib-arm-none-eabi build-essential python3-pip protobuf-compiler
+        pip3 install protobuf grpcio-tools
 
-      - name: arm-none-eabi-gcc GNU Arm Embedded Toolchain
-        uses: carlosperate/arm-none-eabi-gcc-action@v1
-        with: 
-          release: '15.3.Rel1'
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
 
-      - name: Checkout pico-sdk/2.3.1
-        uses: actions/checkout@v6.0.1
-        with:
-          repository: raspberrypi/pico-sdk
-          ref: 2.3.1
-          path: pico-sdk
+    - name: Patch Source & Web-UI to 10 Macro Slots
+      run: |
+        node -e '
+        const fs = require("fs");
+        function patch(f, fn) {
+          if (!fs.existsSync(f)) return;
+          const c = fs.readFileSync(f, "utf8");
+          const u = fn(c);
+          if (c !== u) { fs.writeFileSync(f, u, "utf8"); console.log("Patched:", f); }
+        }
 
-      - name: Checkout pico-sdk submodules
-        working-directory: ${{github.workspace}}/pico-sdk
-        run: git submodule update --init
+        // 1. MAX_MACROS = 10
+        patch("headers/addons/input_macro.h", c => c.replace(/#define\s+MAX_MACROS\s+\d+/, "#define MAX_MACROS 10"));
 
-      - name: Download a Build Artifact
-        uses: actions/download-artifact@v7.0.0
-        with:
-          name: fsData
-          path: ${{github.workspace}}/lib/httpd/
+        // 2. enums.proto
+        patch("proto/enums.proto", c => {
+          if (c.includes("ACTION_PRESS_MACRO_10")) return c;
+          return c.replace(/(ACTION_PRESS_MACRO_6\s*=\s*(\d+);)/, (m, full, n) => {
+            let v = parseInt(n, 10);
+            return `${full}\n    ACTION_PRESS_MACRO_7 = ${v+1};\n    ACTION_PRESS_MACRO_8 = ${v+2};\n    ACTION_PRESS_MACRO_9 = ${v+3};\n    ACTION_PRESS_MACRO_10 = ${v+4};`;
+          });
+        });
 
-      - name: Get core count
-        id: core_count
-        run: cat /proc/cpuinfo  | grep processor | wc -l
-        #End Global Setup
+        // 3. config.proto
+        patch("proto/config.proto", c => c.replace(/(repeated\s+Macro\s+macroList\s*=\s*\d+\s*\[\(nanopb\)\.max_count\s*=\s*)\d+(\];)/, "$110$2"));
 
-      - name: Pico Build Configure CMake
-        shell: bash
-        run: PICO_SDK_PATH=${{github.workspace}}/pico-sdk GP2040_BOARDCONFIG=${{ matrix.GP2040_BOARDCONFIG }} SKIP_WEBBUILD=TRUE cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}}
+        // 4. Erhöhe DOC_SIZE & CONFIG_SIZE (verhindert Exit Code 2 static_assert Fehler)
+        patch("headers/configs/webconfig.h", c => c.replace(/#define\s+DOC_SIZE\s+\d+/, "#define DOC_SIZE 32768"));
+        patch("headers/configmanager.h", c => c.replace(/#define\s+CONFIG_SIZE\s+\d+/, "#define CONFIG_SIZE 16384"));
+        patch("src/configmanager.cpp", c => c.replace(/#define\s+CONFIG_SIZE\s+\d+/, "#define CONFIG_SIZE 16384"));
 
-      - name: Pico Build
-        shell: bash
-        run: GP2040_BOARDCONFIG=${{ matrix.GP2040_BOARDCONFIG }} cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}} --parallel ${{steps.core_count.outputs.output}}
+        // 5. input_macro.cpp (falls Switch-Blöcke genutzt werden)
+        patch("src/addons/input_macro.cpp", c => {
+          if (c.includes("ACTION_PRESS_MACRO_10")) return c;
+          return c.replace(/(case\s+GpioAction::ACTION_PRESS_MACRO_6:[\s\S]*?break;)/g,
+            "$1\n        case GpioAction::ACTION_PRESS_MACRO_7: return 6;\n        case GpioAction::ACTION_PRESS_MACRO_8: return 7;\n        case GpioAction::ACTION_PRESS_MACRO_9: return 8;\n        case GpioAction::ACTION_PRESS_MACRO_10: return 9;");
+        });
 
-      - name: Upload Pico Artifact
-        uses: actions/upload-artifact@v6.0.0
-        with:
-          name: GP2040-CE - ${{ matrix.GP2040_BOARDCONFIG }}
-          path: ${{github.workspace}}/build/GP2040-CE_*_${{ matrix.GP2040_BOARDCONFIG }}.uf2
-          if-no-files-found: error
+        // 6. Web-UI InputMacroAddonPage
+        ["www/src/Pages/InputMacroAddonPage.tsx", "www/src/Pages/InputMacroAddonPage.jsx"].forEach(f => {
+          patch(f, c => c.replace(/(MACRO_INPUTS_MAX\s*=\s*)\d+/g, "$110"));
+        });
 
-      - name: Upload .elf Artifact
-        if: ${{ matrix.GP2040_BOARDCONFIG == 'Pico'}}
-        uses: actions/upload-artifact@v6.0.0
-        with:
-          name: elf
-          path: ${{github.workspace}}/build/GP2040-CE_*_${{ matrix.GP2040_BOARDCONFIG }}.elf
-          if-no-files-found: error
+        // 7. Web-UI Locales & PinMapping
+        const walk = (dir) => {
+          if (!fs.existsSync(dir)) return;
+          for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const fullPath = dir + "/" + entry.name;
+            if (entry.isDirectory()) walk(fullPath);
+            else if (/\.(js|jsx|ts|tsx)$/.test(entry.name)) {
+              patch(fullPath, c => {
+                if (c.includes("ACTION_PRESS_MACRO_10") || !c.includes("ACTION_PRESS_MACRO_6")) return c;
+                return c.replace(/(ACTION_PRESS_MACRO_6\s*:\s*['"`][^'"`]+['"`],?)/g,
+                  "$1\n\tACTION_PRESS_MACRO_7: \"Macro 7\",\n\tACTION_PRESS_MACRO_8: \"Macro 8\",\n\tACTION_PRESS_MACRO_9: \"Macro 9\",\n\tACTION_PRESS_MACRO_10: \"Macro 10\",");
+              });
+            }
+          }
+        };
+        walk("www/src");
+        '
+
+    - name: Build Web-UI
+      working-directory: ./www
+      run: |
+        npm install
+        npm run build
+
+    - name: Setup Pico SDK
+      uses: actions/checkout@v4
+      with:
+        repository: raspberrypi/pico-sdk
+        ref: 1.5.1
+        path: pico-sdk
+        submodules: recursive
+
+    - name: Configure CMake
+      env:
+        PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
+      run: |
+        mkdir build
+        cd build
+        cmake -DGP2040-CE_BOARDCONFIG=${{ matrix.config }} -DBUILD_WEB=OFF ..
+
+    - name: Build Firmware
+      run: |
+        cd build
+        make -j$(nproc)
+
+    - name: Upload UF2 Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: GP2040-CE_${{ matrix.config }}_10Macros
+        path: build/*.uf2
